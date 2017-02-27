@@ -5,7 +5,9 @@ let server;
 
 function init() {
     server = new Server({
-        port: PackageConfig.port
+        host: 'localhost',
+        port: PackageConfig.port,
+        directory: PackageConfig.rootDirectory
     });
 }
 init();

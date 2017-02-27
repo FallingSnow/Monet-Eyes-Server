@@ -1,8 +1,8 @@
-import webpack from 'webpack';
-import path from 'path';
-import fs from 'fs-extra';
-import os from 'os';
-import packageJson from './package.json';
+const webpack = require('webpack');
+const path = require('path');
+const fs = require('fs-extra');
+const os = require('os');
+const packageJson = require('./package.json');
 
 const ENV = process.env.NODE_ENV || 'development';
 
@@ -22,9 +22,6 @@ fs.ensureDirSync(tempDir);
 let symLink = path.join(tempDir, 'node_modules');
 if (ENV === 'development' && !fs.existsSync(symLink))
     fs.symlinkSync(path.resolve(__dirname, 'node_modules'), symLink, 'dir');
-else {
-
-}
 
 const config = {
     target: 'async-node',
@@ -45,50 +42,45 @@ const config = {
     externals: ENV === 'development' ? nodeModules : [],
 
     resolve: {
-        extensions: ['', '.js', '.json'],
-        modulesDirectories: [
-            path.resolve(__dirname, "node_modules"),
-            'node_modules'
-        ],
+        extensions: ['.js', '.json'],
         // unsafeCache: true
     },
 
 
     module: {
-        preLoaders: [{
+        rules: [{
+            enforce: 'pre',
             test: /\.js$/,
             exclude: [/src\//],
-            loader: 'source-map'
-        }],
-        loaders: [{
+            loader: 'source-map-loader'
+        }, {
             test: /\.json$/,
             loader: 'json-loader'
         }, {
             test: /\.js$/,
             exclude: /node_modules/,
-            loader: 'babel'
+            loader: 'babel-loader'
         }, {
-            test: /\.(ttf|eot|svg|flif)(\?v=[0-9]\.[0-9]\.[0-9])?$/,
+            test: /\.(flif)(\?v=[0-9]\.[0-9]\.[0-9])?$/,
             loader: "file-loader"
         }]
     },
 
     plugins: ([
-            new webpack.NoErrorsPlugin(),
             new webpack.DefinePlugin({
                 'process.env': JSON.stringify({
                     NODE_ENV: ENV
                 })
+            }),
+            new webpack.BannerPlugin({
+                banner: 'require("source-map-support").install();',
+                raw: true,
+                entryOnly: false
             })
         ])
         .concat(ENV === 'production' ? [
-            new webpack.optimize.OccurenceOrderPlugin(),
             new webpack.optimize.DedupePlugin(),
-            new webpack.optimize.UglifyJsPlugin(),
-            new webpack.BannerPlugin('require("source-map-support").install();', {
-                raw: false,
-                entryOnly: false
-            })
+            new webpack.optimize.UglifyJsPlugin()
         ] : [
             // new webpack.HotModuleReplacementPlugin({
             //     quiet: true
@@ -99,7 +91,7 @@ const config = {
         colors: true
     },
 
-    devtool: 'source-map',
+    devtool: 'cheap-module-source-map',
     // devtool: '#inline-source-map',
 };
 

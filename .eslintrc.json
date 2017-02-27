@@ -1,17 +1,19 @@
 {
-    "ecmaVersion": 7,
     "env": {
         "es6": true,
         "node": true
     },
     "extends": "eslint:recommended",
     "parserOptions": {
+        "ecmaVersion": 2017,
+        "sourceType": "module",
         "ecmaFeatures": {
             "experimentalObjectRestSpread": true
         }
     },
     "rules": {
         "no-console": "off",
+        "no-duplicate-case": "off",
         "no-unused-vars": "warn"
     }
 }

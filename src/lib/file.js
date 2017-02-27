@@ -1,75 +1,208 @@
 import fs from 'fs-extra';
 import Path from 'path';
-import {
-    spawn,
-    exec
-} from 'child_process';
-import os from 'os';
 import PackageConfig from '../../package.json';
-import Gm from 'gm';
-import Flif from 'flif';
+import Vinyl from 'vinyl';
+import mime from 'mime';
+import murmur from 'murmurhash-native';
+import parallel from 'async/parallel';
+import _ from 'lodash';
+import metadataProcessor, {metadataIsOutdated} from './metadataProcessors';
+import logger from './logger.js';
 
-const sizeRegex = /\, ([0-9]+)x([0-9]+)\,/;
+const VERSION = 2;
+let isUpdating = {};
+let counter = 0;
 
-let FILE = {
-    stat: function(path, cb) {
-        if (typeof cb !== 'function')
-            return console.log('Callback function was not provided.');
-        if (typeof path !== 'string')
-            return cb('First argument [path] must be of type string.');
+export default class File extends Vinyl {
+    /*
+     * @param mime = mime type
+     * @param stats = stats object
+     * @param type = file type (directory, file, other)
+     * @param ready(updated)
+     */
+    constructor(options, onReady) {
+        if (counter++ > 50)
+        process.exit(1);
+        if (Vinyl.isVinyl(options)) {
+            super({
+                path: options.history[options.history.length - 1]
+            });
+            Object.assign(this, options);
 
-        console.log('Getting stats for', Path.join(PackageConfig.rootDirectory, path));
-        fs.stat(Path.join(PackageConfig.rootDirectory, path), cb);
-    },
-    size: function(path, cb) {
-        if (typeof cb !== 'function')
-            return console.log('Callback function was not provided.');
-        if (typeof path !== 'string')
-            return cb('First argument [path] must be of type string.');
+            // Update file if version is less than current
+            if (this.version < File.version) {
+                logger.debug('[%s]: Supplied file version [%d] less than that of database [%d]. Requesting file update...', this.relative, this.version, File.version);
+                this.update(onReady);
+            } else
+                this.verifyIntegrity((valid) => {
+                    if (!valid) {
+                        logger.debug('[%s]: Supplied hash does not match current hash. Requesting file update...', this.relative);
+                        this.update(onReady);
+                    } else if (metadataIsOutdated(this)) {
+                        logger.debug('[%s]: Metadata version is less than module\'s metadata version. Updating metadata...', this.relative);
+                        this.update(onReady);
+                    } else {
+                        onReady();
+                    }
+                });
+        } else {
+            super(options);
+            this.init(onReady);
+            this.metadata = {};
+        }
 
-        console.log('Getting size for', Path.join(PackageConfig.rootDirectory, path));
-        FILE.stat(path, function(err, stats) {
-            if (err)
-                return cb(err);
+    }
+    init(cb) {
+        this.update(cb);
+    }
+    // cb(error, file, updated)
+    update(cb = () => {}) {
+        let _self = this;
 
-            cb(err, stats.size);
+        // If not already updating, start updating
+        if (!isUpdating[this.path]) {
+            isUpdating[this.path] = new Promise((resolve, reject) => {
+                logger.trace('Updating %s', _self.path);
+
+                // Update stats, filetype, and mime
+                File.stat(_self.path, (err, stats) => {
+                    if (err)
+                        return reject(err);
+
+                    _self.stat = stats;
+                    if (stats.isFile()) {
+                        _self.type = 'file';
+                        _self.mime = mime.lookup(_self.path);
+                    } else if (stats.isDirectory())
+                        _self.type = 'directory';
+                    else {
+                        _self.type = 'other';
+                    }
+
+                    parallel([
+                        // Update metadata
+                        (done) => {
+                            _self.special.call(_self, done);
+                        },
+
+                        // Update hash
+                        (done) => {
+                            _self.renderHash((hash) => {
+                                _self.hash = hash;
+                                done();
+                            });
+                        }
+                    ], (err) => {
+                        if (err) return reject(err);
+
+                        _self.version = File.version;
+                        resolve();
+                    });
+                });
+            });
+        }
+
+        isUpdating[this.path].then(() => {
+            delete isUpdating[this.path];
+            cb(null, true);
+        }).catch((err) => {
+            logger.error('Error creating file:', err);
+            delete isUpdating[this.path];
+            cb('Error creating file: ' + err.message);
+        })
+    }
+    verifyIntegrity(cb) {
+        let _self = this;
+        this.renderHash((hash) => {
+            cb(_self.hash === hash);
         });
-    },
-    read: function(path, bytes, cb) {
-        if (typeof cb !== 'function')
-            return console.log('Callback function was not provided.');
-        if (typeof bytes !== 'number')
-            return cb('Second argument [bytes] must be of type number.');
-        if (typeof path !== 'string')
-            return cb('First argument [path] must be of type string.');
+    }
+    openStream(cb, options) {
+        options = Object.assign({
+            start: 0
+        }, options);
+        if (this.type === 'directory') {
+            return cb(new Error('Cannot request readStream on a directory'))
+        }
+        switch (this.content.type) {
+            case 'localfile':
+                cb(null, fs.createReadStream(this.path, options));
+                break;
+            default:
+                cb(new Error('Unknown content file type.'));
+                break;
+        }
+    }
 
-        const filePath = Path.join(PackageConfig.rootDirectory, path);
-        console.log('Reading', Path.join(PackageConfig.rootDirectory, path));
-        fs.open(filePath, 'r', function(err, fd) {
+    // ################# This function applies file type specific operations
+    special(cb) {
+        let _self = this;
+        if (this.type === 'directory') {
+            fs.readdir(this.path, (err, children) => {
+                _self.content = {
+                    type: 'list',
+                    list: children
+                };
+                cb();
+            });
+        } else if (this.type === 'file') {
+            _self.content = {
+                type: 'localfile',
+                address: _self.path
+            };
+            metadataProcessor(this, cb);
+        } else {
+            cb();
+        }
+    }
+    renderHash(cb) {
+        if (this.type === 'file')
+            fs.readFile(this.path, (err, data) => {
+                if (err) throw err;
+                cb(murmur.murmurHash128x64(data));
+            });
+        else if (this.type === 'directory') {
+            // TODO: This is kind of retarded (reading a dir to see if I should
+            // read it...)
+            fs.readdir(this.path, (err, paths) => {
+                cb(murmur.murmurHash128x64(paths.join('')));
+            });
+        } else {
+            cb(Math.random());
+        }
+    }
+    get sanitized() {
+        let file = _.omitBy(this, (val, key) => {
+            return key.startsWith('_');
+        });
+        return file;
+    }
+    static stat(path, cb) {
+        fs.stat(path, (err, stats) => {
             if (err) {
-                fs.close(fd);
+                logger.error('Could not stat directory:', err);
                 return cb(err);
             }
-
-            fs.read(fd, Buffer.alloc(bytes), 0, bytes, 0, function(err, bytesRead, buffer) {
-                fs.close(fd);
-                if (err)
-                    return cb(err);
-
-                cb(err, buffer);
-            });
+            cb(null, stats);
         });
-    },
+    }
+    static get version() {
+        return VERSION;
+    }
+}
+
+
+let FILE = {
     info: function(path, cb) {
         if (typeof cb !== 'function')
-            return console.log('Callback function was not provided.');
+            return logger.log('Callback function was not provided.');
         if (typeof path !== 'string')
             return cb('First argument [path] must be of type string.');
 
         let file = {};
         const filePath = Path.join(PackageConfig.rootDirectory, path);
         Object.assign(file, getFilePaths(path));
-        console.log('Getting info for', filePath);
+        logger.log('Getting info for', filePath);
         FILE.stat(path, function(err, stat) {
             if (err)
                 return cb(err);
@@ -92,68 +225,27 @@ let FILE = {
                             prev: paths[0],
                             next: paths[1],
                         });
-
                         cb(err, file);
-                    })
+                    });
                 });
             } else {
-                cb(null, stat);
-            }
-        });
-    },
-    thumbnail: function(path, cb) {
-        if (typeof cb !== 'function')
-            return console.log('Callback function was not provided.');
-        if (typeof path !== 'string')
-            return cb('First argument [path] must be of type string.');
+                FILE.getPathRealtiveTo(path, [-1, 1], function(err, paths) {
+                    if (err)
+                        return cb(err);
 
-        const filePath = Path.join(PackageConfig.rootDirectory, path);
-        const thumbnailPath = Path.join(PackageConfig.rootDirectory, '.thumbnails', path);
-        console.log('Getting thumbnail for', filePath);
-        fs.readFile(thumbnailPath, function(err, buffer) {
-            if (err) {
-
-                // Thumbnail does not exist, lets create it
-                if (err.code === 'ENOENT') {
-                    return createThumbnail.flif(filePath, thumbnailPath, function(err) {
-                        if (err)
-                            return cb(err);
-
-                        FILE.thumbnail(path, cb);
+                    Object.assign(file, {
+                        prev: paths[0],
+                        next: paths[1],
                     });
-                } else
-                    return cb(err);
+                    cb(err, file);
+                });
             }
-            cb(err, buffer);
-        });
-    },
-    identifyFlif: function(path, cb) {
-        if (typeof cb !== 'function')
-            return console.log('Callback function was not provided.');
-        if (typeof path !== 'string')
-            return cb('First argument [path] must be of type string.');
-
-        const filePath = Path.join(PackageConfig.rootDirectory, path);
-        console.log('Identifying flif', filePath);
-
-        exec('flif --identify ' + filePath, function(err, stdout) {
-            if (err)
-                return cb(err);
-
-            let matches = sizeRegex.exec(stdout);
-            if (!matches)
-                return cb(stdout);
-
-            cb(null, {
-                width: matches[1],
-                height: matches[2]
-            });
         });
     },
     // TODO: Allow pos to be array of positions
     getPathRealtiveTo: function(path, positions, cb) {
         if (typeof cb !== 'function')
-            return console.log('Callback function was not provided.');
+            return logger.log('Callback function was not provided.');
         if (typeof path !== 'string')
             return cb('First argument [path] must be of type string.');
         if (typeof positions !== 'object')
@@ -161,7 +253,7 @@ let FILE = {
 
         const filePath = Path.join(PackageConfig.rootDirectory, path);
         const directory = Path.dirname(filePath);
-        console.log('Getting path(s) at', positions, 'relative to', filePath);
+        logger.log('Getting path(s) at', positions, 'relative to', filePath);
 
         fs.readdir(directory, (err, paths) => {
             if (err)
@@ -193,120 +285,3 @@ let FILE = {
     }
 
 };
-
-export default FILE;
-
-const createThumbnail = {
-    flif: function(input, output, cb) {
-        if (typeof cb !== 'function')
-            return console.log('Callback function was not provided.');
-        if (typeof input !== 'string')
-            return cb('First argument [input] must be of type string.');
-        if (typeof output !== 'string')
-            return cb('Second argument [output] must be of type string.');
-
-        console.log('Creating thumbnail for', input);
-        const outputDirectory = Path.dirname(output);
-
-        fs.ensureDir(outputDirectory, function(err) {
-            if (err)
-                return cb(err);
-
-            //             const decoder = spawn('flif', ['-d', input, '-']).on('error', cb);
-            //             const encoder = spawn('flif', ['-e', '-Q20', '-N', '-', output]).on('error', cb);
-            //
-            //             decoder.stderr.on('data', (data) => {
-            //   console.log(`stderr: ${data}`);
-            // });
-            //             encoder.stderr.on('data', (data) => {
-            //   console.log(`stderr: ${data}`);
-            // });
-            //
-            //             Gm(decoder.stdout)
-            //                 .resize(300, null) // Resize to width 300 while maintaining aspect ratio
-            //                 .quality(0) // Fastest compression
-            //                 .stream(function(err, stdout, stderr) {
-            //                     if (err)
-            //                         return cb(err.Error);
-            //
-            //                     // stdout.pipe(encoder.stdin);
-            //                 })
-            //                 .write(output, function(err) {
-            //                     if (!err) console.log('done');
-            //                 });
-            //
-            //             encoder.on('close', (code) => {
-            //                 console.log("SUCCESS!")
-            //             });
-            // Create temp file to store the downscaled, non flif encoded image
-            makeTempFile(5, 'png', function(err, tempFile) {
-                if (err)
-                    return cb(err);
-
-                Flif.decode(input, tempFile, function(err, stdout, stderr) {
-                    if (err)
-                        return cb(err);
-
-                    Gm(tempFile)
-                        .resize(null, 180) // Resize to width 300 while maintaining aspect ratio
-                        .quality(0) // Fastest compression
-                        .write(tempFile, function(err) {
-
-                            if (err)
-                                return cb(err.Error);
-
-                            Flif.encode(tempFile, output, ['-Q'+PackageConfig.thumnail.quality, '-N'], function(err, stdout, stderr) {
-                                if (err)
-                                    return cb(err);
-
-                                fs.remove(tempFile, function(err) {
-                                    if (err) console.log(err);
-                                });
-
-                                cb(err);
-                            });
-                        });
-                });
-            });
-        });
-    }
-}
-
-const charmap = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
-const tempDir = os.tmpdir();
-
-function makeTempFile(length, extension, cb) {
-    let path, counter = 0;
-    do {
-        counter++;
-        let base = '';
-        for (let i = 0; i < length; i++) {
-            base += charmap[Math.floor(Math.random() * charmap.length)];
-        }
-        path = tempDir + '/' + base + '.' + extension;
-    } while (fs.existsSync(path) && counter < 10);
-
-    if (fs.existsSync(path))
-        return cb('Failed to generate temp filename.');
-
-    cb(null, path);
-}
-
-function getFilePaths(path) {
-    const parsed = Path.parse(path);
-    return {
-        basename: parsed.name,
-        extension: parsed.ext,
-        name: parsed.base,
-        path: path,
-        relativePath: parsed.base
-    };
-}
-
-function getType(stat) {
-    if (stat.isFile())
-        return 'file';
-    if (stat.isDirectory())
-        return 'directory';
-    return 'unknown';
-}

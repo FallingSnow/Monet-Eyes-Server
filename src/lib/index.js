@@ -1,9 +1,11 @@
-import Directory from "./directory.js";
 import File from "./file.js";
 import SocketServer from "./socketServer.js";
+import MetadataDatabase from "./metadata/database.js";
+import logger from "./logger.js";
 
 export {
-    Directory,
     File,
-    SocketServer
+    SocketServer,
+    MetadataDatabase,
+    logger
 };
