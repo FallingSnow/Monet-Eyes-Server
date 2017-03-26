@@ -29,6 +29,7 @@
     "socket.io-stream": "^0.9.1",
     "socketio-jwt": "^4.5.0",
     "source-map-support": "^0.4.11",
+    "tingodb": "^0.5.1",
     "vinyl": "^2.0.1"
   },
   "devDependencies": {

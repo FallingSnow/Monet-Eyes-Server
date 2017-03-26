@@ -6,7 +6,9 @@ import mime from 'mime';
 import murmur from 'murmurhash-native';
 import parallel from 'async/parallel';
 import _ from 'lodash';
-import metadataProcessor, {metadataIsOutdated} from './metadataProcessors';
+import metadataProcessor, {
+    metadataIsOutdated
+} from './metadataProcessors';
 import logger from './logger.js';
 
 const VERSION = 2;
@@ -22,7 +24,7 @@ export default class File extends Vinyl {
      */
     constructor(options, onReady) {
         if (counter++ > 50)
-        process.exit(1);
+            process.exit(1);
         if (Vinyl.isVinyl(options)) {
             super({
                 path: options.history[options.history.length - 1]
@@ -87,7 +89,8 @@ export default class File extends Vinyl {
 
                         // Update hash
                         (done) => {
-                            _self.renderHash((hash) => {
+                            _self.renderHash((err, hash) => {
+                                if (err) return done(err);
                                 _self.hash = hash;
                                 done();
                             });
@@ -113,8 +116,8 @@ export default class File extends Vinyl {
     }
     verifyIntegrity(cb) {
         let _self = this;
-        this.renderHash((hash) => {
-            cb(_self.hash === hash);
+        this.renderHash((err, hash) => {
+            cb(err, _self.hash === hash);
         });
     }
     openStream(cb, options) {
@@ -143,7 +146,7 @@ export default class File extends Vinyl {
                     type: 'list',
                     list: children
                 };
-                cb();
+                cb(err);
             });
         } else if (this.type === 'file') {
             _self.content = {
@@ -158,17 +161,21 @@ export default class File extends Vinyl {
     renderHash(cb) {
         if (this.type === 'file')
             fs.readFile(this.path, (err, data) => {
-                if (err) throw err;
-                cb(murmur.murmurHash128x64(data));
+                if (err) return cb(err);
+                cb(null, murmur.murmurHash128x64(data));
             });
         else if (this.type === 'directory') {
             // TODO: This is kind of retarded (reading a dir to see if I should
             // read it...)
             fs.readdir(this.path, (err, paths) => {
-                cb(murmur.murmurHash128x64(paths.join('')));
+                if (err) return cb(err);
+                if (paths.length < 1) {
+                    return cb(null, murmur.murmurHash128x64(Math.random()));
+                }
+                cb(null, murmur.murmurHash128x64(paths.join('')));
             });
         } else {
-            cb(Math.random());
+            cb(null, murmur.murmurHash128x64(Math.random()));
         }
     }
     get sanitized() {

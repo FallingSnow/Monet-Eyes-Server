@@ -1,6 +1,7 @@
 import {
     MongoClient
 } from 'mongodb';
+import TingoClient from 'tingodb';
 import Vinyl from 'vinyl';
 import recursive from 'recursive-readdir';
 import async from 'async';
